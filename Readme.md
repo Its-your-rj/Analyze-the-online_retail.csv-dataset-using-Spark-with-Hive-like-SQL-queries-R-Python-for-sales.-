@@ -130,61 +130,79 @@ python notebooks/02_clean.py
 
 ## 🔢 The Pipeline – Stage by Stage
 
-### `00_start_spark.py` (Optional Sanity Check)
+Here is a detailed breakdown of each stage in the analytics pipeline.
 
-* **Purpose**: A simple script to confirm that your Spark, Java, and Python environment is correctly configured.
-* **Logic**: It initializes a `SparkSession`, prints the Spark version, creates a tiny DataFrame, and displays it. This is the first thing to run if you encounter environment issues.
-* **Output**: A success message and DataFrame printed to the console.
+### Stage 00: Sanity Check (`00_start_spark.py`) 🛠️
 
-### `01_ingest_and_preview.py`
+* **Objective**: To perform a basic "smoke test" of the environment before running any real workload.
+* **The "Why"**: Data pipelines involving Spark have several dependencies (Java, Python, Spark, environment variables). A failure in any of these can cause cryptic errors later. This script isolates the environment setup from the data processing logic. If this script fails, the problem is with the installation or configuration, not the pipeline code.
+* **Step-by-Step Logic Breakdown**:
+    1.  **Import `SparkSession`**: This is the entry point to all Spark functionality.
+    2.  **Initialize `SparkSession`**: The code `SparkSession.builder.appName("SanityCheck").getOrCreate()` tells Spark to find or create a new Spark session for this application.
+    3.  **Create a DataFrame**: It creates a tiny, hardcoded dataset and converts it into a Spark DataFrame, confirming that Spark's core data structure is working.
+    4.  **Show the DataFrame**: Calling `.show()` triggers an action in Spark, forcing it to execute the plan and display the result, which confirms the execution engine is operational.
+* **Expected Outcome**: You see the Spark version and a small table printed to your console. This is a definitive confirmation that your environment is ready.
 
-* **Purpose**: To read the raw CSV data, infer its schema, and log a preview.
-* **Logic**:
-    * Uses `spark.read.csv()` with `header` and `inferSchema` options set to `true`.
-    * Prints the inferred schema to the console and log file. This helps catch potential data type issues early (e.g., a numeric column being read as a string).
-    * Shows the first few rows of the raw data.
-* **Output**: A log file (`logs/01_ingest.log`) containing the raw schema and a data sample.
+### Stage 01: Ingest and Preview (`01_ingest_and_preview.py`) 📝
 
-### `02_clean.py`
+* **Objective**: To load the raw data from its source (CSV) into Spark and perform an initial inspection.
+* **The "Why"**: Before cleaning data, you must understand its initial state. This stage acts as a documented first look. By inferring the schema, you let Spark guess the data types. Logging this is crucial for reproducibility, as it records exactly how Spark first interpreted the raw file.
+* **Step-by-Step Logic Breakdown**:
+    1.  **Read CSV**: `spark.read.option("header","true").csv(...)` tells Spark to use the first row of the CSV as column names.
+    2.  **Infer Schema**: `option("inferSchema","true")` instructs Spark to scan the data to guess the data type for each column. This is convenient for exploration, though in production an explicit schema is more reliable.
+    3.  **Print Schema**: The `.printSchema()` method displays the column names and their inferred data types, helping you spot potential issues (e.g., a `Price` column read as a string).
+    4.  **Show Data**: `.show()` displays the top rows of the raw DataFrame, giving you a tangible preview of the data.
+* **Expected Outcome**: A log file (`01_ingest.log`) is created, serving as a permanent record of the raw data's structure at the time of ingestion.
 
-* **Purpose**: To transform the raw data into a clean, structured dataset ready for analysis and save it as Parquet.
-* **Key Transformations**:
-    1.  **Trimming Whitespace**: Removes leading/trailing spaces from the `Description` field.
-    2.  **Type Casting**: Ensures `Quantity` and `Price` are `double` types for accurate calculations.
-    3.  **Filtering Records**:
-        * Keeps only rows where `Quantity > 0`.
-        * Excludes returns/credits by filtering out invoices that start with `"C"`.
-        * Drops rows with a null `Customer ID` to ensure the quality of customer-level analytics.
-    4.  **Creating Derived Fields**:
-        * `Revenue` is calculated as `Quantity * Price`.
-        * Time dimensions (`year`, `month`, `day`, `hour`) are extracted from `InvoiceDate` for easy time-based aggregation.
-* **Output**: A partitioned Parquet dataset written to `spark_output/clean_online_retail_parquet/`.
+### Stage 02: Clean and Transform (`02_clean.py`) 🧹
 
-### `03_queries.py`
+* **Objective**: To apply business rules and transformations to convert the raw, messy data into a clean, reliable, and analytics-ready dataset.
+* **The "Why"**: This is the most critical stage of the ETL process. Raw data often contains errors, irrelevant information (like returns), and missing values. This stage enforces data quality and shapes the data according to business definitions. Writing the output to **Parquet** is a deliberate choice for efficiency; its columnar format dramatically speeds up analytical queries compared to row-based formats like CSV.
+* **Step-by-Step Logic Breakdown**:
+    1.  **Read Raw Data**: The script starts by loading the raw data ingested in the previous stage.
+    2.  **Apply Transformations**:
+        * `trim(Description)`: Removes leading/trailing spaces from product descriptions to ensure consistent grouping.
+        * **Type Casting**: Explicitly converts `Quantity` and `Price` to a numeric type (e.g., `Double`) to enable mathematical operations.
+        * **Filter `Quantity > 0`**: Removes data errors or stock adjustments to focus analysis on actual sales.
+        * **Filter `~col("Invoice").startswith("C")`**: Excludes returns and cancellations (a key business rule) to create a dataset of **gross sales**.
+        * **Filter `col("Customer ID").isNotNull()`**: Removes anonymous purchases to ensure the quality of customer-centric analytics.
+        * **Create `Revenue`**: Engineers a new feature (`Quantity * Price`), which is the primary metric for most sales analyses.
+        * **Create Time Dimensions**: Extracts `year`, `month`, `day`, and `hour` from `InvoiceDate` to make time-based aggregations highly efficient.
+    3.  **Write to Parquet**: The final, cleaned DataFrame is written to a directory using `.write.mode("overwrite").parquet(...)`. `overwrite` ensures the data is fresh on each pipeline run.
+* **Expected Outcome**: A directory named `clean_online_retail_parquet` containing compressed Parquet files. This directory is now the **single source of truth** for all subsequent analytics.
 
-* **Purpose**: To run foundational business queries on the clean data and export the results as CSV files.
-* **Queries**:
-    1.  **Monthly Revenue**: Aggregates total revenue by year and month.
-    2.  **Top 10 Products**: Ranks products by total revenue to identify best-sellers.
-    3.  **Top 10 Customers**: Ranks customers by total revenue to identify high-value accounts.
-* **Output**: Three separate CSV files located in `python_reports/monthly_revenue/`, `python_reports/top_products/`, and `python_reports/top_customers/`.
+### Stage 03: Run Analytics Queries (`03_queries.py`) 📊
 
-### `04_plots.py`
+* **Objective**: To answer fundamental business questions by querying the clean dataset and saving the results into a shareable CSV format.
+* **The "Why"**: While Parquet is great for machines, business users often need simple, aggregated summaries. This stage bridges that gap by generating high-level Key Performance Indicators (KPIs) and making them accessible in a universally used format.
+* **Step-by-Step Logic Breakdown**:
+    1.  **Read Clean Data**: The script reads the clean Parquet dataset from the `spark_output/` directory.
+    2.  **Run Queries**: It uses Spark SQL or the DataFrame API to perform aggregations:
+        * **Monthly Revenue**: `GROUP BY year, month` and `SUM(Revenue)` to track sales trends.
+        * **Top 10 Products**: `GROUP BY Description`, `SUM(Revenue)`, then `ORDER BY total_revenue DESC` to identify best-sellers.
+        * **Top 10 Customers**: Applies the same logic to `Customer ID` to find high-value accounts.
+    3.  **Write to CSV**: Each query result is written to its own folder as a CSV file.
+* **Expected Outcome**: Three folders inside `python_reports/`, each containing CSV files with aggregated results for monthly revenue, top products, and top customers.
 
-* **Purpose**: To create a simple visualization from the analytics results using Python.
-* **Logic**:
-    * Reads the monthly revenue CSV generated in the previous stage into a Pandas DataFrame.
-    * Uses `matplotlib` to create a line chart visualizing revenue trends over time.
-* **Output**: A PNG image saved to `docs/monthly_revenue.png`.
+### Stage 04: Visualize with Python (`04_plots.py`) 📈
 
-### `05_visualize.R`
+* **Objective**: To visually represent one of the key findings from the query stage using Python.
+* **The "Why"**: Visualizations make trends and patterns instantly obvious. A line chart of monthly revenue is far more intuitive for spotting seasonality or growth than a table of numbers. This stage creates a report-ready PNG chart.
+* **Step-by-Step Logic Breakdown**:
+    1.  **Read Aggregated Data**: This lightweight script reads the small `monthly_revenue.csv` into a **Pandas DataFrame**, a common pattern where Spark does the heavy lifting and Pandas handles final, small-scale manipulation.
+    2.  **Plotting**: It uses the `matplotlib` library to create a line chart with clear labels and a title.
+    3.  **Save Figure**: The generated plot is saved as a PNG file to the `docs/` folder.
+* **Expected Outcome**: A `monthly_revenue.png` image file in the `docs/` folder, ready to be embedded in a presentation or report.
 
-* **Purpose**: To demonstrate how the Parquet data can be consumed by another language (R) for analysis and visualization.
-* **Logic**:
-    * Uses the `arrow` package to efficiently read the partitioned Parquet dataset directly into R.
-    * Leverages `dplyr` for data manipulation to calculate monthly revenue and top products.
-    * Uses `ggplot2` to create high-quality visualizations.
-* **Output**: Two PNG images saved to `docs/monthly_revenue_R.png` and `docs/top_products_R.png`.
+### Stage 05: Visualize with R (`05_visualize.R`) 🎨
+
+* **Objective**: To demonstrate the language-agnostic nature of the Parquet data store by recreating the analysis in R.
+* **The "Why"**: Different teams prefer different tools. This stage proves that the Parquet output from Stage 02 is a universal asset that can be consumed by multiple downstream tools (like R) without conversion, fostering collaboration between data engineering and data science teams.
+* **Step-by-Step Logic Breakdown**:
+    1.  **Read Parquet with `arrow`**: The R script uses `arrow::open_dataset()` to efficiently read the partitioned Parquet files without loading the entire dataset into memory, making it incredibly fast.
+    2.  **Data Manipulation with `dplyr`**: It uses `dplyr` verbs (`group_by`, `summarise`) to perform the same aggregations for monthly revenue and top products.
+    3.  **Visualization with `ggplot2`**: It uses `ggplot2`, the premier data visualization library in R, to create high-quality, aesthetically pleasing plots.
+* **Expected Outcome**: Two new PNG files in the `docs/` folder (`monthly_revenue_R.png` and `top_products_R.png`), showcasing the results from an R-based analysis.
 
 ---
 
